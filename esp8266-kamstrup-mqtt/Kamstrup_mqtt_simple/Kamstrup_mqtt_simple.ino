@@ -3,8 +3,9 @@
 #include "gcm.h"
 #include "mbusparser.h"
 #include "secrets.h"
+#include <WiFiUdp.h>
 
-#define DEBUG_BEGIN Serial.begin(115200);
+#define DEBUG_BEGIN // Serial.begin(115200);
 #define DEBUG_PRINT(x) Serial.print(x);sendmsg(String(mqtt_topic)+"/status",x);
 #define DEBUG_PRINTLN(x) Serial.println(x);sendmsg(String(mqtt_topic)+"/status",x);
 
@@ -21,10 +22,22 @@ mbedtls_gcm_context m_ctx;
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+#define UDP_PORT 4210
+WiFiUDP Udp;
+
+void printUdp(const char* str)
+{
+  char packet[255];
+  strcpy(packet, str);
+  Udp.beginPacket(IPAddress(0xffffffff), 4210);
+  Udp.write(packet);
+  Udp.endPacket();
+}
+
 void setup() {
   //DEBUG_BEGIN
   //DEBUG_PRINTLN("")
-  Serial.begin(115200);
+  Serial.begin(2400);
   Serial.println(" I can print something");
 
   WiFi.begin(ssid, password);
@@ -34,16 +47,18 @@ void setup() {
     Serial.println("Connecting to WiFi..");
   }
   Serial.println("Connected to the WiFi network");
+  Serial.flush();
 
   client.setServer(mqttServer, mqttPort);
   
   while (!client.connected()) {
     Serial.println("Connecting to MQTT...");
+    Serial.flush();
 
     if (client.connect(mqttClientID)) { //, mqttUser, mqttPassword )) {
 
       Serial.println("connected");
-
+      Serial.flush();
     } else {
 
       Serial.print("failed with state ");
@@ -51,28 +66,43 @@ void setup() {
       delay(2000);
 
     }
+
   }
 
-  Serial.begin(2400, SERIAL_8N1);
-  Serial.swap();
+  Serial.flush();
+  //delay(200); // Some delay to ensure all has been sent
+
+  //Serial.begin(2400, SERIAL_8N1);
+  //Serial.swap();
   hexStr2bArr(encryption_key, conf_key, sizeof(encryption_key));
   hexStr2bArr(authentication_key, conf_authkey, sizeof(authentication_key));
+
+  Udp.begin(UDP_PORT);
   Serial.println("Setup completed");
+
+  printUdp("Setup completed!!\n");
 
 }
 
+bool firstData = false;
+
 void loop() {
   while (Serial.available() > 0) {
+    if (!firstData)
+    {
+      printUdp("Got first serial data :)\n");
+      firstData = true;
+    }
     //Serial.println("test");
     //for(int i=0;i<sizeof(input);i++){
     if (streamParser.pushData(Serial.read())) {
       //  if (streamParser.pushData(input[i])) {
       VectorView frame = streamParser.getFrame();
       if (streamParser.getContentType() == MbusStreamParser::COMPLETE_FRAME) {
-        DEBUG_PRINTLN("Frame complete");
+        printUdp("Frame complete\n");
         if (!decrypt(frame))
         {
-          DEBUG_PRINTLN("Decryption failed");
+          printUdp("Decryption failed\n");
           return;
         }
         MeterData md = parseMbusFrame(decryptedFrame);

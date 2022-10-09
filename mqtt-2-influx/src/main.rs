@@ -1,11 +1,15 @@
 use std::{env, process, time::Duration};
+use influxdb::{Client, Query, Timestamp, ReadQuery};
+use influxdb::InfluxDbWriteable;
+use chrono::{DateTime, Utc};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 extern crate paho_mqtt as mqtt;
 
 const DFLT_BROKER: &str = "192.168.0.28";
 const DFLT_CLIENT: &str = "influx_writer";
 
-const TOPICS: &[&str] = &["kamstrup/activePowerPlus"];
+const TOPICS: &[&str] = &["temperature/temp1"];
 const QOS:&[i32] = &[1];
 
 fn subscribe_topics(cli: &mqtt::Client) {
@@ -15,7 +19,14 @@ fn subscribe_topics(cli: &mqtt::Client) {
     }
 }
 
-fn main() {
+#[derive(InfluxDbWriteable)]
+struct TempReading {
+    time: DateTime<Utc>,
+    temperature: f32,
+}
+
+#[tokio::main]
+async fn main() {
     let host = env::args().nth(1).unwrap_or_else(||
         DFLT_BROKER.to_string()
     );
@@ -50,9 +61,38 @@ fn main() {
 
     subscribe_topics(&cli);
 
+    let influx = Client::new("http://192.168.0.28:8086", "house").with_auth("lars", "foobarbaz");
+
+    // let read_query = ReadQuery::new("SELECT * FROM weather");
+
+    // let read_result = influx.query(read_query).await;
+    // if let Err(err) = &read_result { 
+    //     println!("Error: {:?}", err);
+    // }
+    // assert!(read_result.is_ok(), "Read result was not ok");
+    // println!("{}", read_result.unwrap());
+
     for msg in rx.iter() {
         if let Some(msg) = msg {
             println!("{}", msg);
+
+
+            let start = SystemTime::now();
+            let since_the_epoch = start
+                 .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_millis();
+            let reading = TempReading {
+                time: Timestamp::Milliseconds(since_the_epoch).into(),
+                temperature: msg.payload_str().parse().unwrap(),
+            };
+
+            let write_result = influx
+                .query(reading.into_query("house"))
+                .await;
+            assert!(write_result.is_ok(), "Write result was not okay: {:?}", write_result);
+            println!("Write result: {:?}", write_result);
+
         }
     }
 

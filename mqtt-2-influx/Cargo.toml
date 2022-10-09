@@ -7,4 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.65"
+chrono = "0.4.22"
+influxdb = { version="0.5.2", features = ["derive"] }
 paho-mqtt = "0.11.1"
+tokio = { version = "1.21.1", features = ["macros", "rt", "rt-multi-thread"] }

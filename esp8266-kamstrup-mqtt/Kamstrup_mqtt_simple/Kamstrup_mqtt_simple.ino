@@ -4,6 +4,8 @@
 #include "mbusparser.h"
 #include "secrets.h"
 #include <WiFiUdp.h>
+#include <string>
+#include <user_interface.h>
 
 #define DEBUG_BEGIN // Serial.begin(115200);
 #define DEBUG_PRINT(x) Serial.print(x);sendmsg(String(mqtt_topic)+"/status",x);
@@ -27,16 +29,18 @@ WiFiUDP Udp;
 
 void printUdp(const char* str)
 {
-  char packet[255];
-  strcpy(packet, str);
   Udp.beginPacket(IPAddress(0xffffffff), 4210);
-  Udp.write(packet);
+  Udp.write(str);
   Udp.endPacket();
 }
+
+uint32 lastWake = 0;
+uint32 serialCounter = 0;
 
 void setup() {
   //DEBUG_BEGIN
   //DEBUG_PRINTLN("")
+  Serial.setRxBufferSize(1024);
   Serial.begin(2400);
   Serial.println(" I can print something");
 
@@ -82,36 +86,165 @@ void setup() {
 
   printUdp("Setup completed!!\n");
 
+  // printUdp("Going to sleep\n");
+  // delay(200);
+  // WiFi.forceSleepBegin();
+  // yield();
 }
 
 bool firstData = false;
+uint32 oldTime = 0;
 
-void loop() {
-  while (Serial.available() > 0) {
-    if (!firstData)
+void loop2() 
+{
+    client.loop();
+    printUdp("Going to sleep\n");
+    delay(200);
+    // WiFi.mode( WIFI_OFF );
+    WiFi.forceSleepBegin();
+    delay(10000);
+    WiFi.forceSleepWake();
+    delay(1);
+    // Bring up the WiFi connection
+    // WiFi.mode(WIFI_STA);
+    // WiFi.begin(ssid, password);
+
+    int wakeTime = 0;    
+    uint32 tick = system_get_time();
+    uint32 cycleTime = tick - oldTime;
+    oldTime = tick;
+    while (WiFi.status() != WL_CONNECTED)
     {
-      printUdp("Got first serial data :)\n");
-      firstData = true;
+      wakeTime += 100;
+      delay(100);
     }
+    uint32 connectTime = system_get_time() - tick;
+
+    if (!client.connected())
+    {
+      printUdp("MQTT was disconnected, reconnecting\n");
+      client.connect(mqttClientID);
+    }
+
+    uint32 mqttTime = system_get_time() - tick;
+
+    printUdp((std::string("Has woken up, sending MQTT wifi: ") + std::to_string(connectTime) + "us, MQTT: " + std::to_string(mqttTime) + "us, cycle: " + std::to_string(cycleTime) + "us\n").c_str());
+    client.publish("outtopic", "hello is awake");
+    // for (int i = 0;i != 10; i++)
+    // {      
+    //   client.loop();
+    //   delay(100);
+    // }
+}
+
+void wakeAndPrint(const char* str)
+{
+  WiFi.forceSleepWake();
+  delay(1);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(100);
+  }  
+  printUdp(str);
+
+  delay(200);
+  WiFi.forceSleepBegin();
+  lastWake = system_get_time();
+}
+
+void wakeAndSend(const MeterData& md)
+{
+  WiFi.forceSleepWake();
+  delay(1);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(100);
+  }
+  if (!client.connected())
+  {
+    client.connect(mqttClientID);
+  }
+
+  printUdp("Frame ok, sending MQTT\n");
+  sendData(md);
+
+  delay(200);
+  WiFi.forceSleepBegin();
+  lastWake = system_get_time();
+}
+
+uint32_t frameStartCount = 0;
+
+
+void loop3() {
+  while (Serial.available() > 0) {
+    serialCounter++;
     //Serial.println("test");
     //for(int i=0;i<sizeof(input);i++){
-    if (streamParser.pushData(Serial.read())) {
+    uint8_t data = Serial.read();
+    if (data == 0x7E)
+    {
+      frameStartCount++;
+    }
+    if (streamParser.pushData(data)) {
       //  if (streamParser.pushData(input[i])) {
       VectorView frame = streamParser.getFrame();
       if (streamParser.getContentType() == MbusStreamParser::COMPLETE_FRAME) {
-        printUdp("Frame complete\n");
         if (!decrypt(frame))
         {
-          printUdp("Decryption failed\n");
+          wakeAndPrint("Decryption failed\n");
           return;
         }
         MeterData md = parseMbusFrame(decryptedFrame);
-        sendData(md);
+        wakeAndSend(md);
       }
     }
   }
-  client.loop();
+  delay(100);
+  if ((system_get_time() - lastWake) > 15000000)
+  {
+    wakeAndPrint((std::string("No frames received in 15s. Serial counter = ") + std::to_string(serialCounter) + ", frame = " + std::to_string(frameStartCount) + "\n").c_str());  
+  }
 }
+
+std::vector<uint8_t> buffer;
+uint32_t lastData = system_get_time();
+
+template <typename I> std::string n2hexstr(I w, size_t hex_len = sizeof(I)<<1) {
+    static const char* digits = "0123456789ABCDEF";
+    std::string rc(hex_len,'0');
+    for (size_t i=0, j=(hex_len-1)*4 ; i<hex_len; ++i,j-=4)
+        rc[i] = digits[(w>>j) & 0x0f];
+    return rc;
+}
+
+void loop()
+{
+  while (Serial.available() > 0)
+  {
+    buffer.push_back(Serial.read());
+    lastData = system_get_time();
+  }
+
+  delay(100);
+  if ((system_get_time() - lastData) > 1000000)
+  {
+    if (buffer.size() > 0)
+    {
+      std::string text;
+      text.reserve(buffer.size() * 2 + 10);
+      text += std::to_string(buffer.size()) + ":";
+      for (const auto d : buffer)
+      {
+        text += n2hexstr(d, 2);
+      }
+      text += "<\n";
+      buffer.clear();
+      printUdp(text.c_str());
+    }
+  }
+}
+
 
 void sendData(MeterData md) {
   if (md.activePowerPlusValid)
